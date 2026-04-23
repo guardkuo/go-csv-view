@@ -15,10 +15,11 @@ import (
 
 var selector int = 1
 var usingBar int = 0
+var showExecTimeOnly int = 1
 
 const (
 	ldioFilePath   = "ldio.csv"
-	pdskioFilePath = "PhdIO0.csv"
+	pdskioFilePath = ".\\test\\PhdIO0.csv"
 	LBALabel       = "LBA"
 	DepthInLDLabel = "Depth(LD)"
 	DepthLabel     = "Depth"
@@ -48,10 +49,22 @@ func renderChartHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func renderPdskIoChartHandler(w http.ResponseWriter, r *http.Request) {
-	records, err := loadCsv(pdskioFilePath)
+	var ioFilePath string
+	id := r.URL.Query().Get("id")
+
+	if id == "" {
+		ioFilePath = pdskioFilePath
+	} else {
+		ioFilePath = ".\\test\\PhdIO" + id + ".csv"
+	}
+
+	records, err := loadCsv(ioFilePath)
 	if err != nil {
-		http.Error(w, "無法讀取 CSV: "+err.Error(), http.StatusInternalServerError)
-		return
+		records, err = loadCsv(pdskioFilePath)
+		if err != nil {
+			http.Error(w, "無法讀取 CSV: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 
 	if usingBar == 1 {
@@ -60,8 +73,13 @@ func renderPdskIoChartHandler(w http.ResponseWriter, r *http.Request) {
 		line.Render(w)
 	} else {
 		xData, lbaData, depthData := preparePdskIOChartLineData(records)
-		line := plotPhDrvIoLineChart(xData, lbaData, depthData)
-		line.Render(w)
+		if showExecTimeOnly == 1 {
+			line := plotPhDrvIoExecChart(xData, lbaData, depthData)
+			line.Render(w)
+		} else {
+			line := plotPhDrvIoLineChart(xData, lbaData, depthData)
+			line.Render(w)
+		}
 	}
 }
 
@@ -222,6 +240,42 @@ func plotPhDrvIoLineChart(xData []string, ExecTimeData []opts.ScatterData, depth
 	// --- 3. 疊加 ---
 	mainChart.Overlap(ExecTimeScatter)
 	mainChart.Overlap(depthLine)
+
+	return mainChart
+}
+
+func plotPhDrvIoExecChart(xData []string, ExecTimeData []opts.ScatterData, depthData []opts.LineData) *charts.Line {
+	mainChart := charts.NewLine()
+	mainChart.SetGlobalOptions(
+		charts.WithInitializationOpts(opts.Initialization{
+			Theme: "shine", Width: "100%", Height: "800px",
+		}),
+		charts.WithTitleOpts(opts.Title{Title: "Pdsk IO View | Infortrend"}),
+		charts.WithDataZoomOpts(
+			opts.DataZoom{Type: "slider", Start: 0, End: 2},
+			opts.DataZoom{Type: "inside"},
+		),
+		charts.WithTooltipOpts(opts.Tooltip{Show: opts.Bool(true), Trigger: "axis"}),
+		charts.WithYAxisOpts(opts.YAxis{Name: "Time(us)", Type: "value", Scale: opts.Bool(true)}),
+	)
+
+	mainChart.SetXAxis(xData)
+
+	// --- 1. LBA 散點圖 (Scatter) ---
+	ExecTimeScatter := charts.NewScatter()
+	ExecTimeScatter.AddSeries(ExecTimeLabel, ExecTimeData).
+		SetSeriesOptions(
+			// 關鍵修正：透過匿名函式直接操作 SingleSeries 內部，但避開 Symbol 欄位
+			// 我們改用 Type 強制指定為散點，ECharts 預設就會用 circle 且不畫線
+			func(s *charts.SingleSeries) {
+				s.Type = "scatter"
+				s.SymbolSize = 4 // 將 size 從 2 縮小為 1
+			},
+			charts.WithItemStyleOpts(opts.ItemStyle{Opacity: opts.Float(0.7)}),
+		)
+
+	// --- 3. 疊加 ---
+	mainChart.Overlap(ExecTimeScatter)
 
 	return mainChart
 }
