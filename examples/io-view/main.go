@@ -16,6 +16,8 @@ import (
 var selector int = 1
 var usingBar int = 0
 var showExecTimeOnly int = 1
+// record the IO per 500 us.
+var ioSplitTimer uint64 = 500
 
 const (
 	ldioFilePath   = "ldio.csv"
@@ -43,7 +45,8 @@ func renderChartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	xData, lbaData, depthData := prepareChartData(records)
+	//xData, lbaData, depthData := prepareChartData(records)
+	xData, lbaData, depthData := prepareLBARangeChartData(records)
 	line := plotChart(xData, lbaData, depthData)
 	line.Render(w)
 }
@@ -72,7 +75,8 @@ func renderPdskIoChartHandler(w http.ResponseWriter, r *http.Request) {
 		line := plotPhDrvIoChart(xData, lbaData, depthData)
 		line.Render(w)
 	} else {
-		xData, lbaData, depthData := preparePdskIOChartLineData(records)
+		//xData, lbaData, depthData := preparePdskIOChartLineData(records)
+		xData, lbaData, depthData := preparePdskIOv2ChartLineData(records)
 		if showExecTimeOnly == 1 {
 			line := plotPhDrvIoExecChart(xData, lbaData, depthData)
 			line.Render(w)
@@ -314,6 +318,72 @@ func prepareChartData(records [][]string) ([]string, []opts.ScatterData, []opts.
 	return x, lba, depth
 }
 
+func prepareLBARangeChartData(records [][]string) ([]string, []opts.ScatterData, []opts.LineData) {
+	var splitT uint64 = 0
+	var preLBA uint64 = 0
+	var totLBARange uint64 = 0
+	var depthVal int = 0
+	startRow := 0
+	if len(records) > 0 && strings.Contains(records[0][0], "LD") {
+		startRow = 1
+	}
+
+	x := make([]string, 0)
+	lba := make([]opts.ScatterData, 0)
+	depth := make([]opts.LineData, 0)
+	var startTestTime uint64
+
+	for _, record := range records[startRow:] {
+		if len(record) < 7 {
+			continue
+		}
+
+		startTVal, _ := strconv.ParseUint(record[1], 10, 64)
+		if startTestTime == 0 {
+			startTestTime = startTVal
+		}
+
+		if splitT == 0 {
+			splitT = startTVal + 4 * ioSplitTimer
+		}
+
+		if startTVal >= splitT {
+				x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer) >> 2, 10))
+				lba = append(lba, opts.ScatterData{Value: (totLBARange/uint64(depthVal)) })
+				depth = append(depth, opts.LineData{Value: depthVal})
+				depthVal = 0
+				totLBARange = 0
+				splitT += 4 * ioSplitTimer
+				for startTVal >= splitT {
+					x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer) >> 2, 10))
+					lba = append(lba, opts.ScatterData{Value: 0})
+					depth = append(depth, opts.LineData{Value: 0})
+					splitT += 4 * ioSplitTimer
+				}
+		}
+
+		lbaVal, _ := strconv.ParseUint(record[4], 10, 64)
+		sizeVal, _ := strconv.ParseUint(record[5], 10, 64)
+		if preLBA != 0 {
+			if lbaVal > preLBA {
+				totLBARange += (lbaVal - preLBA) >> 21
+			} else {
+				totLBARange += (preLBA - lbaVal) >> 21
+			}
+		}
+		preLBA = lbaVal + sizeVal
+
+		depthVal++
+	}
+
+	if depthVal != 0 {
+				x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer) >> 2, 10))
+				lba = append(lba, opts.ScatterData{Value: (totLBARange/uint64(depthVal)) })
+				depth = append(depth, opts.LineData{Value: depthVal})
+	}
+	return x, lba, depth
+}
+
 func preparePdskIOChartData(records [][]string) ([]string, []opts.ScatterData, []opts.BarData) {
 	startRow := 0
 	if len(records) > 0 && strings.Contains(records[0][0], "Start Time") {
@@ -392,6 +462,68 @@ func preparePdskIOChartLineData(records [][]string) ([]string, []opts.ScatterDat
 		x = append(x, strconv.FormatUint(startTVal>>2, 10))
 		execT = append(execT, opts.ScatterData{Value: ExecTimeVal >> 2})
 		depth = append(depth, opts.LineData{Value: depthVal})
+	}
+	return x, execT, depth
+}
+
+func preparePdskIOv2ChartLineData(records [][]string) ([]string, []opts.ScatterData, []opts.LineData) {
+	var depthVal int = 0
+	var splitT uint64 = 0
+	var TotExecTimeVal uint64 = 0
+	var ExecTimeVal uint64
+	startRow := 0
+	if len(records) > 0 && strings.Contains(records[0][0], "Start Time") {
+		startRow = 1
+	}
+
+	x := make([]string, 0)
+	execT := make([]opts.ScatterData, 0)
+	depth := make([]opts.LineData, 0)
+	var startTestTime uint64
+
+	for _, record := range records[startRow:] {
+		if len(record) < 6 {
+			continue
+		}
+
+		endTVal, _ := strconv.ParseUint(record[1], 10, 64)
+		if endTVal == 0 {
+			continue
+		}
+		startTVal, _ := strconv.ParseUint(record[0], 10, 64)
+
+		if splitT == 0 {
+			splitT = startTVal + 4 * ioSplitTimer
+		}
+
+		if startTestTime == 0 {
+			startTestTime = startTVal
+		}
+
+		ExecTimeVal, _ = strconv.ParseUint(record[5], 10, 64)
+		if startTVal >= splitT {
+				x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer)>>2, 10))
+				execT = append(execT, opts.ScatterData{Value: TotExecTimeVal/uint64(depthVal) >> 2})
+				depth = append(depth, opts.LineData{Value: depthVal})
+				TotExecTimeVal = 0
+				depthVal = 0
+				splitT += 4 * ioSplitTimer
+				for startTVal >= splitT {
+						x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer)>>2, 10))
+						execT = append(execT, opts.ScatterData{Value: 0})
+						depth = append(depth, opts.LineData{Value: 0})
+						splitT += 4 * ioSplitTimer
+				}
+		}
+
+		TotExecTimeVal += ExecTimeVal
+		depthVal++
+	}
+
+	if depthVal != 0 {
+				x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer)>>2, 10))
+				execT = append(execT, opts.ScatterData{Value: TotExecTimeVal/uint64(depthVal) >> 2})
+				depth = append(depth, opts.LineData{Value: depthVal})
 	}
 	return x, execT, depth
 }
