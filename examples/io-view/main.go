@@ -16,16 +16,18 @@ import (
 var selector int = 1
 var usingBar int = 0
 var showExecTimeOnly int = 1
+
 // record the IO per 500 us.
 var ioSplitTimer uint64 = 500
 
 const (
-	ldioFilePath   = "ldio.csv"
-	pdskioFilePath = ".\\test\\PhdIO0.csv"
-	LBALabel       = "LBA"
-	DepthInLDLabel = "Depth(LD)"
-	DepthLabel     = "Depth"
-	ExecTimeLabel  = "ExecTime"
+	ldioFilePath     = "ldio.csv"
+	pdskioFilePath   = ".\\test\\PhdIO0.csv"
+	LBALabel         = "LBA"
+	DepthInLDLabel   = "Depth(LD)"
+	DepthLabel       = "Depth"
+	ExecTimeLabel    = "ExecTime"
+	MaxExecTimeLable = "MaxExecTime"
 )
 
 func main() {
@@ -45,7 +47,6 @@ func renderChartHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	//xData, lbaData, depthData := prepareChartData(records)
 	xData, lbaData, depthData := prepareLBARangeChartData(records)
 	line := plotChart(xData, lbaData, depthData)
 	line.Render(w)
@@ -76,9 +77,9 @@ func renderPdskIoChartHandler(w http.ResponseWriter, r *http.Request) {
 		line.Render(w)
 	} else {
 		//xData, lbaData, depthData := preparePdskIOChartLineData(records)
-		xData, lbaData, depthData := preparePdskIOv2ChartLineData(records)
+		xData, lbaData, depthData, maxExecTData := preparePdskIOv2ChartLineData(records)
 		if showExecTimeOnly == 1 {
-			line := plotPhDrvIoExecChart(xData, lbaData, depthData)
+			line := plotPhDrvIoExecChart(xData, lbaData, depthData, maxExecTData)
 			line.Render(w)
 		} else {
 			line := plotPhDrvIoLineChart(xData, lbaData, depthData)
@@ -248,7 +249,7 @@ func plotPhDrvIoLineChart(xData []string, ExecTimeData []opts.ScatterData, depth
 	return mainChart
 }
 
-func plotPhDrvIoExecChart(xData []string, ExecTimeData []opts.ScatterData, depthData []opts.LineData) *charts.Line {
+func plotPhDrvIoExecChart(xData []string, ExecTimeData []opts.ScatterData, depthData []opts.LineData, MaxExecTimeData []opts.ScatterData) *charts.Line {
 	mainChart := charts.NewLine()
 	mainChart.SetGlobalOptions(
 		charts.WithInitializationOpts(opts.Initialization{
@@ -262,10 +263,8 @@ func plotPhDrvIoExecChart(xData []string, ExecTimeData []opts.ScatterData, depth
 		charts.WithTooltipOpts(opts.Tooltip{Show: opts.Bool(true), Trigger: "axis"}),
 		charts.WithYAxisOpts(opts.YAxis{Name: "Time(us)", Type: "value", Scale: opts.Bool(true)}),
 	)
-
 	mainChart.SetXAxis(xData)
 
-	// --- 1. LBA 散點圖 (Scatter) ---
 	ExecTimeScatter := charts.NewScatter()
 	ExecTimeScatter.AddSeries(ExecTimeLabel, ExecTimeData).
 		SetSeriesOptions(
@@ -277,9 +276,20 @@ func plotPhDrvIoExecChart(xData []string, ExecTimeData []opts.ScatterData, depth
 			},
 			charts.WithItemStyleOpts(opts.ItemStyle{Opacity: opts.Float(0.7)}),
 		)
-
+	MaxExecTimeScatter := charts.NewScatter()
+	MaxExecTimeScatter.AddSeries(MaxExecTimeLable, MaxExecTimeData).
+		SetSeriesOptions(
+			// 關鍵修正：透過匿名函式直接操作 SingleSeries 內部，但避開 Symbol 欄位
+			// 我們改用 Type 強制指定為散點，ECharts 預設就會用 circle 且不畫線
+			func(s *charts.SingleSeries) {
+				s.Type = "scatter"
+				s.SymbolSize = 4 // 將 size 從 2 縮小為 1
+			},
+			charts.WithItemStyleOpts(opts.ItemStyle{Opacity: opts.Float(0.7)}),
+		)
 	// --- 3. 疊加 ---
 	mainChart.Overlap(ExecTimeScatter)
+	mainChart.Overlap(MaxExecTimeScatter)
 
 	return mainChart
 }
@@ -344,22 +354,22 @@ func prepareLBARangeChartData(records [][]string) ([]string, []opts.ScatterData,
 		}
 
 		if splitT == 0 {
-			splitT = startTVal + 4 * ioSplitTimer
+			splitT = startTVal + 4*ioSplitTimer
 		}
 
 		if startTVal >= splitT {
-				x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer) >> 2, 10))
-				lba = append(lba, opts.ScatterData{Value: (totLBARange/uint64(depthVal)) })
-				depth = append(depth, opts.LineData{Value: depthVal})
-				depthVal = 0
-				totLBARange = 0
+			x = append(x, strconv.FormatUint((splitT-startTestTime-4*ioSplitTimer)>>2, 10))
+			lba = append(lba, opts.ScatterData{Value: (totLBARange / uint64(depthVal))})
+			depth = append(depth, opts.LineData{Value: depthVal})
+			depthVal = 0
+			totLBARange = 0
+			splitT += 4 * ioSplitTimer
+			for startTVal >= splitT {
+				x = append(x, strconv.FormatUint((splitT-startTestTime-4*ioSplitTimer)>>2, 10))
+				lba = append(lba, opts.ScatterData{Value: 0})
+				depth = append(depth, opts.LineData{Value: 0})
 				splitT += 4 * ioSplitTimer
-				for startTVal >= splitT {
-					x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer) >> 2, 10))
-					lba = append(lba, opts.ScatterData{Value: 0})
-					depth = append(depth, opts.LineData{Value: 0})
-					splitT += 4 * ioSplitTimer
-				}
+			}
 		}
 
 		lbaVal, _ := strconv.ParseUint(record[4], 10, 64)
@@ -377,9 +387,9 @@ func prepareLBARangeChartData(records [][]string) ([]string, []opts.ScatterData,
 	}
 
 	if depthVal != 0 {
-				x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer) >> 2, 10))
-				lba = append(lba, opts.ScatterData{Value: (totLBARange/uint64(depthVal)) })
-				depth = append(depth, opts.LineData{Value: depthVal})
+		x = append(x, strconv.FormatUint((splitT-startTestTime-4*ioSplitTimer)>>2, 10))
+		lba = append(lba, opts.ScatterData{Value: (totLBARange / uint64(depthVal))})
+		depth = append(depth, opts.LineData{Value: depthVal})
 	}
 	return x, lba, depth
 }
@@ -419,7 +429,7 @@ func preparePdskIOChartData(records [][]string) ([]string, []opts.ScatterData, [
 		depthVal, _ := strconv.ParseUint(record[4], 10, 64)
 
 		x = append(x, strconv.FormatUint(startTVal>>2, 10))
-		execT = append(execT, opts.ScatterData{Value: ExecTimeVal >> 2})
+		execT = append(execT, opts.ScatterData{Value: ExecTimeVal})
 		depth = append(depth, opts.BarData{Value: depthVal})
 	}
 	return x, execT, depth
@@ -453,23 +463,21 @@ func preparePdskIOChartLineData(records [][]string) ([]string, []opts.ScatterDat
 		}
 
 		ExecTimeVal, _ := strconv.ParseUint(record[5], 10, 64)
-		if ExecTimeVal == startTVal {
-			continue
-		}
 
 		depthVal, _ := strconv.ParseUint(record[4], 10, 64)
 
-		x = append(x, strconv.FormatUint(startTVal>>2, 10))
-		execT = append(execT, opts.ScatterData{Value: ExecTimeVal >> 2})
+		x = append(x, strconv.FormatUint(startTVal, 10))
+		execT = append(execT, opts.ScatterData{Value: ExecTimeVal})
 		depth = append(depth, opts.LineData{Value: depthVal})
 	}
 	return x, execT, depth
 }
 
-func preparePdskIOv2ChartLineData(records [][]string) ([]string, []opts.ScatterData, []opts.LineData) {
+func preparePdskIOv2ChartLineData(records [][]string) ([]string, []opts.ScatterData, []opts.LineData, []opts.ScatterData) {
 	var depthVal int = 0
 	var splitT uint64 = 0
 	var TotExecTimeVal uint64 = 0
+	var MaxExecTimeVal uint64 = 0
 	var ExecTimeVal uint64
 	startRow := 0
 	if len(records) > 0 && strings.Contains(records[0][0], "Start Time") {
@@ -478,6 +486,7 @@ func preparePdskIOv2ChartLineData(records [][]string) ([]string, []opts.ScatterD
 
 	x := make([]string, 0)
 	execT := make([]opts.ScatterData, 0)
+	maxExecT := make([]opts.ScatterData, 0)
 	depth := make([]opts.LineData, 0)
 	var startTestTime uint64
 
@@ -493,7 +502,7 @@ func preparePdskIOv2ChartLineData(records [][]string) ([]string, []opts.ScatterD
 		startTVal, _ := strconv.ParseUint(record[0], 10, 64)
 
 		if splitT == 0 {
-			splitT = startTVal + 4 * ioSplitTimer
+			splitT = startTVal + 4*ioSplitTimer
 		}
 
 		if startTestTime == 0 {
@@ -501,31 +510,38 @@ func preparePdskIOv2ChartLineData(records [][]string) ([]string, []opts.ScatterD
 		}
 
 		ExecTimeVal, _ = strconv.ParseUint(record[5], 10, 64)
-		if startTVal >= splitT {
-				x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer)>>2, 10))
-				execT = append(execT, opts.ScatterData{Value: TotExecTimeVal/uint64(depthVal) >> 2})
-				depth = append(depth, opts.LineData{Value: depthVal})
-				TotExecTimeVal = 0
-				depthVal = 0
-				splitT += 4 * ioSplitTimer
-				for startTVal >= splitT {
-						x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer)>>2, 10))
-						execT = append(execT, opts.ScatterData{Value: 0})
-						depth = append(depth, opts.LineData{Value: 0})
-						splitT += 4 * ioSplitTimer
-				}
-		}
 
+		if startTVal >= splitT {
+			x = append(x, strconv.FormatUint((splitT-startTestTime-4*ioSplitTimer)>>2, 10))
+			execT = append(execT, opts.ScatterData{Value: TotExecTimeVal / uint64(depthVal)})
+			maxExecT = append(maxExecT, opts.ScatterData{Value: MaxExecTimeVal})
+			depth = append(depth, opts.LineData{Value: depthVal})
+			TotExecTimeVal = 0
+			MaxExecTimeVal = 0
+			depthVal = 0
+			splitT += 4 * ioSplitTimer
+			for startTVal >= splitT {
+				x = append(x, strconv.FormatUint((splitT-startTestTime-4*ioSplitTimer)>>2, 10))
+				execT = append(execT, opts.ScatterData{Value: 0})
+				maxExecT = append(maxExecT, opts.ScatterData{Value: 0})
+				depth = append(depth, opts.LineData{Value: 0})
+				splitT += 4 * ioSplitTimer
+			}
+		}
+		if MaxExecTimeVal < ExecTimeVal {
+			MaxExecTimeVal = ExecTimeVal
+		}
 		TotExecTimeVal += ExecTimeVal
 		depthVal++
 	}
 
 	if depthVal != 0 {
-				x = append(x, strconv.FormatUint((splitT - startTestTime - 4 * ioSplitTimer)>>2, 10))
-				execT = append(execT, opts.ScatterData{Value: TotExecTimeVal/uint64(depthVal) >> 2})
-				depth = append(depth, opts.LineData{Value: depthVal})
+		x = append(x, strconv.FormatUint((splitT-startTestTime-4*ioSplitTimer)>>2, 10))
+		execT = append(execT, opts.ScatterData{Value: TotExecTimeVal / uint64(depthVal)})
+		maxExecT = append(maxExecT, opts.ScatterData{Value: MaxExecTimeVal})
+		depth = append(depth, opts.LineData{Value: depthVal})
 	}
-	return x, execT, depth
+	return x, execT, depth, maxExecT
 }
 
 func loadCsv(filePath string) ([][]string, error) {
