@@ -53,3 +53,7 @@ Thumbs.db
 
 ########### Go coverage tool output
 *.out
+
+### output
+*.exe
+*.csv
